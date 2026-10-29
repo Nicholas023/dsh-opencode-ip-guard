@@ -55,7 +55,9 @@ DSH 的模型请求走 Node 内置 fetch（undici 全局 dispatcher），默认*
 
 以下命令以 PowerShell 为例，profile 目录默认是 `$env:USERPROFILE\.dsh\profiles\desktop`。
 
-### 方式一：npm（包发布到 npm 之后）
+### 方式一：npm（推荐，已发布）
+
+包已发布到 npm：[dsh-opencode-ip-guard](https://www.npmjs.com/package/dsh-opencode-ip-guard)
 
 ```powershell
 cd $env:USERPROFILE\.dsh\profiles\desktop
