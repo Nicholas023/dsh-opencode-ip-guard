@@ -115,6 +115,9 @@ pnpm add "link:D:\DSH-Files-v2\02-DSH开发\dshapi长连接插件"
     enabled: true                 # 总开关
     forceIps: []                  # 测试钩子：非空时忽略真实解析，只用这些 IP
     retryDelaysMs: [60000, 120000] # 探测全失败后的重试间隔（毫秒）
+    blacklistTtlMs: 300000        # 黑名单条目的软过期时间（毫秒）
+    confirmDelayMs: 2000          # 探测失败后的二次确认间隔（毫秒）
+    expiryCheckIntervalMs: 30000  # 检查"是否有条目过期"的间隔（毫秒）
 ```
 
 | 键 | 类型 | 默认值 | 说明 |
@@ -124,6 +127,9 @@ pnpm add "link:D:\DSH-Files-v2\02-DSH开发\dshapi长连接插件"
 | `enabled` | boolean | `true` | 总开关。设为 `false` 时插件不探测、不注入 dispatcher（等价于没装）。 |
 | `forceIps` | string[] | `[]` | 测试钩子：非空时忽略真实 DNS 解析，只在这些 IP 里过滤挑选。用于验收 3 的阴性对照。 |
 | `retryDelaysMs` | number[] | `[60000, 120000]` | 探测全失败后的重试间隔序列。数组走完仍失败则置 `failed` 并放弃。 |
+| `blacklistTtlMs` | number | `300000` | **软过期时间**。opencode.ai 某些 IP 的可达性会分钟级波动，单次探测必然有误判；条目到期自动视为可用，让误判最多存活这么久。 |
+| `confirmDelayMs` | number | `2000` | **失败二次确认间隔**。探测失败的 IP 隔这么久再试一次，**连续两次失败才判黑洞**，避免瞬时抖动被固化成「永久坏」。 |
+| `expiryCheckIntervalMs` | number | `30000` | 检查过期条目的节拍。注意这不是周期性探测：只有存在「过期且是黑洞」的条目时才会触发重探。 |
 
 **取值校验**（非法值一律回退默认值并打一条 warn，绝不抛错、绝不影响 DSH 启动）：
 
@@ -131,7 +137,24 @@ pnpm add "link:D:\DSH-Files-v2\02-DSH开发\dshapi长连接插件"
 - `retryDelaysMs` 只接受非负有限数，过滤后为空则回默认；
 - `forceIps` 只接受合法 IPv4 字面量；
 - `hostname` 需为非空字符串（会 trim 并转小写）；
-- `enabled` 只认布尔值。
+- `enabled` 只认布尔值；
+- `blacklistTtlMs` 夹到 10000~3600000 毫秒；
+- `confirmDelayMs` 夹到 100~10000 毫秒；
+- `expiryCheckIntervalMs` 夹到 5000~600000 毫秒。
+
+### 为什么需要「软过期 + 二次确认」
+
+实测发现 opencode.ai 的 A 记录集合是稳定的（1 小时内恒为 4 个），但其中某些 IP 的**可达性会波动**：同一 IP 可能这小时通、下小时不通。如果探测只做一次快照：
+
+- 一次瞬时抖动就会把好 IP 判成「永久黑洞」，本次运行内不再使用；
+- 极端情况下 4 个 IP 轮流被冤枉 → 全部拉黑 → 触发「全黑回退」→ 插件等于失效。
+
+所以加了两层保险：
+
+1. **失败二次确认**（`confirmDelayMs`）：首轮失败的 IP 隔 2 秒再探一次，连续两次失败才拉黑；
+2. **软 TTL**（`blacklistTtlMs`）：即使真的拉黑了，5 分钟后自动过期放行，并触发一次补探更新结论。
+
+两者都不会产生周期性探测，符合「不打扰远端」的原则。
 
 ---
 

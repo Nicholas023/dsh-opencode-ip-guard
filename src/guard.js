@@ -21,6 +21,13 @@ const DEFAULT_CONFIG = Object.freeze({
   forceIps: [],
   // D9：第一次失败 1 分钟后重探；仍失败 2 分钟后再探；第三次失败放弃
   retryDelaysMs: [60000, 120000],
+  // 黑名单软 TTL：探测是瞬时快照，IP 可达性会分钟级波动，5 分钟后旧结论自动失效（放行）
+  // 注意：该默认值必须与 index.js 的 DEFAULTS 保持一致（以 index.js 传入值为准）
+  blacklistTtlMs: 300000,
+  // 失败二次确认等待：2 秒足以过滤瞬态抖动，又不至于把探测轮次拖太久
+  confirmDelayMs: 2000,
+  // 过期检查节拍：每 30 秒扫一次；只有真的出现过期黑洞条目时才补探（不是周期探测）
+  expiryCheckIntervalMs: 30000,
 });
 
 /**
@@ -226,6 +233,27 @@ function mergeConfig(raw) {
     enabled: source.enabled !== false,
     forceIps: Array.isArray(source.forceIps) ? uniqueStrings(source.forceIps) : [],
     retryDelaysMs: retryDelaysMs.length > 0 ? retryDelaysMs : DEFAULT_CONFIG.retryDelaysMs,
+    // 软 TTL 允许 0（结论立即过期，供测试/极端场景），非法值回退默认
+    blacklistTtlMs:
+      typeof source.blacklistTtlMs === 'number' &&
+      Number.isFinite(source.blacklistTtlMs) &&
+      source.blacklistTtlMs >= 0
+        ? Math.round(source.blacklistTtlMs)
+        : DEFAULT_CONFIG.blacklistTtlMs,
+    // 二次确认等待允许 0（立即复探），非法值回退默认
+    confirmDelayMs:
+      typeof source.confirmDelayMs === 'number' &&
+      Number.isFinite(source.confirmDelayMs) &&
+      source.confirmDelayMs >= 0
+        ? Math.round(source.confirmDelayMs)
+        : DEFAULT_CONFIG.confirmDelayMs,
+    // 节拍必须为正数，0/负数等价于关闭节拍器，按非法值回退默认更安全
+    expiryCheckIntervalMs:
+      typeof source.expiryCheckIntervalMs === 'number' &&
+      Number.isFinite(source.expiryCheckIntervalMs) &&
+      source.expiryCheckIntervalMs > 0
+        ? Math.round(source.expiryCheckIntervalMs)
+        : DEFAULT_CONFIG.expiryCheckIntervalMs,
   };
 }
 
@@ -243,6 +271,9 @@ function mergeConfig(raw) {
  *     resolve4?: Function,
  *     setTimeout?: Function,
  *     clearTimeout?: Function,
+ *     setInterval?: Function,
+ *     clearInterval?: Function,
+ *     delay?: (ms: number) => Promise<void>,
  *     env?: Record<string, unknown>,
  *   },
  * }} [opts]
@@ -277,17 +308,36 @@ export function createGuard(opts = {}) {
   const buildStatus =
     typeof deps.buildStatus === 'function' ? deps.buildStatus : defaultBuildStatus;
 
+  // 黑名单的软 TTL 由配置决定：guard 是唯一知道「结论保鲜期」语义的地方
+  const blacklistOptions = { ttlMs: config.blacklistTtlMs };
   let blacklist;
   try {
-    blacklist = createBlacklistFactory();
+    blacklist = createBlacklistFactory(blacklistOptions);
   } catch (error) {
     safeLog(LOG_PREFIX + ' 创建黑名单失败，回落到默认实现：' + describeError(error));
-    blacklist = defaultCreateBlacklist();
+    blacklist = defaultCreateBlacklist(blacklistOptions);
   }
 
   // 假定时器注入点：单测要验证 60s/120s 重试阶梯，不能真的等下去
   const scheduleTimeout = typeof deps.setTimeout === 'function' ? deps.setTimeout : setTimeout;
   const cancelTimeout = typeof deps.clearTimeout === 'function' ? deps.clearTimeout : clearTimeout;
+  // 周期定时器注入点（过期检查节拍）
+  const scheduleInterval = typeof deps.setInterval === 'function' ? deps.setInterval : setInterval;
+  const cancelInterval = typeof deps.clearInterval === 'function' ? deps.clearInterval : clearInterval;
+  // 二次确认等待注入点：单测里绝不能真的等 2 秒
+  const wait = typeof deps.delay === 'function' ? deps.delay : defaultDelay;
+
+  /**
+   * 默认的确认等待实现；unref 是为了即便宿主提前退出也不会被这个 2 秒定时器挂住。
+   * @param {number} ms
+   * @returns {Promise<void>}
+   */
+  function defaultDelay(ms) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      if (timer && typeof timer.unref === 'function') timer.unref();
+    });
+  }
 
   // ---- 内部状态（全部只在本闭包内可见） ----
   /** @type {string} 当前状态，取值见契约 5 */
@@ -310,6 +360,8 @@ export function createGuard(opts = {}) {
   let restoreDispatcher = null;
   /** @type {any} 重试定时器句柄 */
   let retryTimer = null;
+  /** @type {any} 过期检查节拍器句柄 */
+  let expiryTimer = null;
 
   /**
    * 计算快照里的 enabled 字段。
@@ -447,6 +499,152 @@ export function createGuard(opts = {}) {
   }
 
   /**
+   * 启动过期检查节拍器（unref，避免拖住宿主退出）。
+   * 为什么用 setInterval 而不是递归 setTimeout：节拍固定、实现简单；
+   * 真正的「探测」仍然只在发现过期黑洞条目时才发生，所以它不是周期性探测。
+   * @returns {void}
+   */
+  function startExpiryWatcher() {
+    if (expiryTimer !== null) return;
+    if (!(config.expiryCheckIntervalMs > 0)) return;
+    try {
+      expiryTimer = scheduleInterval(() => {
+        onExpiryTick();
+      }, config.expiryCheckIntervalMs);
+      if (expiryTimer && typeof expiryTimer.unref === 'function') expiryTimer.unref();
+    } catch (error) {
+      expiryTimer = null;
+      safeLog(LOG_PREFIX + ' 启动过期检查定时器失败：' + describeError(error));
+    }
+  }
+
+  /**
+   * 停止过期检查节拍器。dispose 必须调用它，否则插件卸载后还会继续触发探测。
+   * @returns {void}
+   */
+  function stopExpiryWatcher() {
+    if (expiryTimer !== null) {
+      try {
+        cancelInterval(expiryTimer);
+      } catch (error) {
+        safeLog(LOG_PREFIX + ' 清理过期检查定时器失败：' + describeError(error));
+      }
+    }
+    expiryTimer = null;
+  }
+
+  /**
+   * 找出「TTL 已过期且仍标记为黑洞」的条目 IP。
+   * 为什么要先取 expiredIps 再回查 entries：expiredIps 返回的是所有过期条目（含 ok），
+   * 而只有黑洞条目过期才意味着「过滤结论需要重新验证」。
+   * @param {number} now
+   * @returns {string[]}
+   */
+  function collectExpiredBlackIps(now) {
+    try {
+      const expired = typeof blacklist.expiredIps === 'function' ? blacklist.expiredIps(now) : [];
+      if (!Array.isArray(expired) || expired.length === 0) return [];
+      const expiredSet = new Set(expired);
+      return safeEntries()
+        .filter((entry) => entry && entry.state === 'black' && expiredSet.has(entry.ip))
+        .map((entry) => entry.ip);
+    } catch (error) {
+      safeLog(LOG_PREFIX + ' 检查过期条目失败：' + describeError(error));
+      return [];
+    }
+  }
+
+  /**
+   * 过期检查节拍回调：只有真的存在过期黑洞条目时才补探一次。
+   * 为什么排除 ok 条目：ok 过期不影响过滤，若也算触发条件就会变成每 TTL 一次的周期探测，
+   * 违背用户「不打扰远端」的原则（D5）；同时用 probeInFlight 去重，探测进行中就等下一拍。
+   * @returns {void}
+   */
+  function onExpiryTick() {
+    try {
+      if (disposed || !config.enabled) return;
+      if (state === 'disabled_by_proxy') return;
+      if (probeInFlight) return;
+      const expiredBlackIps = collectExpiredBlackIps(Date.now());
+      if (expiredBlackIps.length === 0) return;
+      safeLog(
+        LOG_PREFIX +
+          ' 检测到 ' +
+          expiredBlackIps.length +
+          ' 个黑洞条目 TTL 到期（' +
+          expiredBlackIps.join(', ') +
+          '），触发补探',
+      );
+      kickProbe('过期补探');
+    } catch (error) {
+      safeLog(LOG_PREFIX + ' 过期检查回调异常：' + describeError(error));
+    }
+  }
+
+  /**
+   * 对首轮探测失败的 IP 做一次延迟复探（二次确认）。
+   * 为什么需要：单次 TLS 探测很容易受瞬态抖动影响（实测同一 IP 上午黑洞、下午可用），
+   * 一次失败就永久拉黑会把抖动固化成误判；隔一会儿再确认一次能显著降低误判率。
+   * 规则：第二次成功 → 按可用记录（ms 取第二次耗时）；两次都失败 → 保留黑洞（error 取第二次）。
+   * @param {Array<{ ip: string, ok: boolean }>} results 首轮结果
+   * @param {Function} probeAll 已解析好的批量探测函数
+   * @returns {Promise<Array<{ ip: string, ok: boolean }>>}
+   */
+  async function confirmFailedTargets(results, probeAll) {
+    const failedIps = uniqueStrings(
+      results.filter((item) => item && item.ok !== true).map((item) => item.ip),
+    );
+    if (failedIps.length === 0) return results;
+
+    const delayMs = config.confirmDelayMs;
+    if (delayMs > 0) {
+      try {
+        await wait(delayMs);
+      } catch (error) {
+        // 等待失败不是 IP 的问题：保留首轮结论，让状态机按既有路径走
+        safeLog(LOG_PREFIX + ' 二次确认等待失败，按首轮结果处理：' + describeError(error));
+        return results;
+      }
+    }
+    if (disposed) return results;
+
+    let second = [];
+    try {
+      const probed = await probeAll(failedIps, {
+        servername: config.hostname,
+        timeoutMs: config.probeTimeoutMs,
+      });
+      second = Array.isArray(probed)
+        ? probed.filter((item) => item && typeof item.ip === 'string' && item.ip !== '')
+        : [];
+    } catch (error) {
+      // 复探异常不等于 IP 有问题：保留首轮结论，避免把「我们探测失败」当成「对方是黑洞」
+      safeLog(LOG_PREFIX + ' 二次确认探测异常，按首轮结果处理：' + describeError(error));
+      return results;
+    }
+    if (second.length === 0) return results;
+
+    const secondByIp = new Map(second.map((item) => [item.ip, item]));
+    let recovered = 0;
+    const merged = results.map((item) => {
+      if (!item || item.ok === true) return item;
+      const retry = secondByIp.get(item.ip);
+      if (!retry) return item;
+      if (retry.ok === true) recovered += 1;
+      return retry;
+    });
+    safeLog(
+      LOG_PREFIX +
+        ' 二次确认：' +
+        failedIps.length +
+        ' 个失败 IP 复探，' +
+        recovered +
+        ' 个恢复可用',
+    );
+    return merged;
+  }
+
+  /**
    * 根据一轮探测结果更新状态机。
    * 全失败时黑名单必须清空（不过滤）：否则一个短暂网络故障就可能把 DSH 锁死（边界 1/8）。
    * @param {Array<{ ip: string, ok: boolean }>} results
@@ -543,7 +741,12 @@ export function createGuard(opts = {}) {
             results = Array.isArray(probed)
               ? probed.filter((item) => item && typeof item.ip === 'string' && item.ip !== '')
               : [];
-            if (results.length === 0) failureDetail = '探测未返回任何结果';
+            if (results.length === 0) {
+              failureDetail = '探测未返回任何结果';
+            } else {
+              // 失败 IP 隔 confirmDelayMs 再确认一次：单次抖动不能直接算黑洞
+              results = await confirmFailedTargets(results, probeAll);
+            }
           }
         }
       } catch (error) {
@@ -647,7 +850,10 @@ export function createGuard(opts = {}) {
       reason = null;
       safeLog(LOG_PREFIX + ' 已安装 undici dispatcher，开始后台探测 ' + config.hostname);
 
-      // 3) 探测异步执行，立即返回（D8）
+      // 3) 过期检查节拍器：只在出现「过期黑洞条目」时才补探
+      startExpiryWatcher();
+
+      // 4) 探测异步执行，立即返回（D8）
       kickProbe('启动');
     } catch (error) {
       state = 'error';
@@ -697,6 +903,7 @@ export function createGuard(opts = {}) {
     try {
       disposed = true;
       clearRetryTimer();
+      stopExpiryWatcher();
       const restore = restoreDispatcher;
       restoreDispatcher = null;
       if (typeof restore === 'function') {

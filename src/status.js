@@ -40,7 +40,14 @@ function toReasonOrNull(value) {
  * 归一化单条黑名单条目；结构不合法时返回 null，由调用方丢弃。
  * 为什么丢弃而不是猜：条目的 state 决定面板显示红色还是绿色，猜错会误导用户。
  * @param {any} raw
- * @returns {{ ip: string, state: 'ok' | 'black', ms: number | null, error: string | null, at: number } | null}
+ * @returns {{
+ *   ip: string,
+ *   state: 'ok' | 'black',
+ *   ms: number | null,
+ *   error: string | null,
+ *   at: number,
+ *   expiresAt: number,
+ * } | null}
  */
 function normalizeEntry(raw) {
   if (!raw || typeof raw !== 'object') return null;
@@ -53,6 +60,9 @@ function normalizeEntry(raw) {
     error: toReasonOrNull(raw.error),
     // 未知时间用 0 占位（面板按 falsy 处理即可），避免快照里出现 NaN/undefined
     at: typeof raw.at === 'number' && Number.isFinite(raw.at) ? raw.at : 0,
+    // 软 TTL 到期时间：面板据此展示「结论还剩多久保鲜」，缺失时同样用 0 占位
+    expiresAt:
+      typeof raw.expiresAt === 'number' && Number.isFinite(raw.expiresAt) ? raw.expiresAt : 0,
   };
 }
 
@@ -100,7 +110,7 @@ function compareByIp(a, b) {
  *   reason: string | null,
  *   lastProbeAt: number | null,
  *   nextRetryAt: number | null,
- *   entries: Array<{ ip: string, state: 'ok' | 'black', ms: number | null, error: string | null, at: number }>,
+ *   entries: Array<{ ip: string, state: 'ok' | 'black', ms: number | null, error: string | null, at: number, expiresAt: number }>,
  *   stats: { ok: number, black: number, total: number },
  * }}
  */

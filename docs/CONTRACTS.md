@@ -37,13 +37,15 @@
     /**
      * 创建黑名单容器。纯内存，无 IO，无可观察副作用。
      */
-    export function createBlacklist()
+    export function createBlacklist(options)
+    // options = { ttlMs?: number, now?: () => number }   // 均可选，向后兼容
+    //   ttlMs 默认 300000；now 默认 Date.now（测试可注入假时钟）
 
 返回对象方法：
 
 | 方法 | 签名 | 语义 |
 |---|---|---|
-| `isBlack` | `(ip: string) => boolean` | 该 IP 是否已被判定为黑洞 |
+| `isBlack` | `(ip: string) => boolean` | 该 IP 是否已被判定为黑洞**且未过期**（过期即视为可用） |
 | `markOk` | `(ip: string, ms: number | null) => void` | 标记可用，记录 TLS 握手耗时 |
 | `markBlack` | `(ip: string, reason: string) => void` | 标记黑洞，reason 如 `'timeout'` / `'econnrefused'` |
 | `rebuild` | `(results: ProbeResult[]) => void` | **用一轮探测结果重建整个黑名单**（清空后按结果重填） |
@@ -51,9 +53,10 @@
 | `entries` | `() => BlacklistEntry[]` | 返回快照数组，按 IP 字符串排序，供面板展示 |
 | `stats` | `() => { ok: number, black: number, total: number }` | 统计 |
 | `clear` | `() => void` | 清空 |
+| `expiredIps` | `(now?: number) => string[]` | 返回当前已过期的 IP（供 guard 决定是否补探）；排序 |
 
     ProbeResult = { ip: string, ok: boolean, ms: number | null, error: string | null }
-    BlacklistEntry = { ip: string, state: 'ok' | 'black', ms: number | null, error: string | null, at: number }
+    BlacklistEntry = { ip: string, state: 'ok' | 'black', ms: number | null, error: string | null, at: number, expiresAt: number }
 
 `at` 是 `Date.now()`，表示该条目最后被更新的时间。
 
@@ -155,7 +158,8 @@
      */
     export function createGuard(opts)
     // opts = {
-    //   config: { hostname, probeTimeoutMs, enabled, forceIps, retryDelaysMs },  // 已合并默认值
+    //   config: { hostname, probeTimeoutMs, enabled, forceIps, retryDelaysMs,
+    //             blacklistTtlMs, confirmDelayMs, expiryCheckIntervalMs },  // 已合并默认值
     //   log: (line: string) => void,
     //   deps?: { createLookup, installDispatcher, probeAll, createBlacklist, buildStatus }  // 可注入，便于测试
     // }
@@ -171,6 +175,8 @@
 - `start()` 必须在检测到代理时**不安装 dispatcher**，state 置 `disabled_by_proxy`；
 - `start()` 探测必须**异步**（不 await 探测完成），立即返回；
 - 全失败时：黑名单不生效（clear），state = `degraded`，按 `retryDelaysMs`（默认 `[60000, 120000]`）重试，第三次失败置 `failed`；
+- **失败二次确认**：首轮探测失败的 IP，隔 `confirmDelayMs`（默认 2000）再探一次；连续两次失败才 `markBlack`，第二次成功按 `markOk` 记录第二次耗时（决策 D21/B）；
+- **过期补探**：每 `expiryCheckIntervalMs`（默认 30000，unref）检查 `expiredIps()`；**只有存在「过期且 state=black」条目**时才触发重探（ok 条目过期不触发，否则退化为周期探测），探测进行中去重（决策 D21/A）；
 - `dispose()` 必须清理定时器并 `restore()` dispatcher；
 - 所有异常在内部捕获并 log，**不得抛出**给 DSH。
 

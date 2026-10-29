@@ -67,7 +67,13 @@ const REFRESH_ROUTE = '/opencode-ip-guard/refresh';
  * - probeTimeoutMs：单 IP TLS 握手超时；D3 定为 6~10 秒档，取 10 秒与 D7/D19 一致；
  * - enabled：总开关，false 时 guard 仍会起来但只读不做任何接管；
  * - forceIps：测试钩子（验收 3 阴性对照用），空数组表示走真实 DNS；
- * - retryDelaysMs：探测全失败后的重试间隔（决策 D9：1 分钟 → 2 分钟 → 放弃）。
+ * - retryDelaysMs：探测全失败后的重试间隔（决策 D9：1 分钟 → 2 分钟 → 放弃）；
+ * - blacklistTtlMs：黑名单条目的软过期时间（用户决策 A）。IP 可达性会分钟级波动，
+ *   单次探测必然有误判；给条目加 TTL，让误判最多存活这么久就自动放行；
+ * - confirmDelayMs：探测失败的二次确认间隔（用户决策 B）。失败后隔这么久再试一次，
+ *   连续两次失败才判黑洞，避免瞬时抖动被固化成"永久坏"；
+ * - expiryCheckIntervalMs：guard 检查"是否有条目过期"的间隔。注意这不是周期性探测——
+ *   只有确实存在过期条目时才会触发重探，符合"不打扰远端"的原则。
  */
 const DEFAULTS = Object.freeze({
   hostname: 'opencode.ai',
@@ -75,6 +81,9 @@ const DEFAULTS = Object.freeze({
   enabled: true,
   forceIps: Object.freeze([]),
   retryDelaysMs: Object.freeze([60000, 120000]),
+  blacklistTtlMs: 300000,
+  confirmDelayMs: 2000,
+  expiryCheckIntervalMs: 30000,
 });
 
 /** 递增序号：同一毫秒内 apply 被重跑两次时，仍能拿到不同的模块 URL。 */
@@ -459,7 +468,7 @@ function sendJson(res, status, payload) {
  *
  * @param {object|undefined} rawConfig - profile 里的 config。
  * @param {(line: string) => void} log - 日志出口（用于报告被丢弃的非法值）。
- * @returns {{hostname: string, probeTimeoutMs: number, enabled: boolean, forceIps: string[], retryDelaysMs: number[]}} 合并后的配置。
+ * @returns {{hostname: string, probeTimeoutMs: number, enabled: boolean, forceIps: string[], retryDelaysMs: number[], blacklistTtlMs: number, confirmDelayMs: number, expiryCheckIntervalMs: number}} 合并后的配置。
  */
 function normalizeConfig(rawConfig, log) {
   /** 归一化结果：先深拷贝默认值（防止下游改动污染冻结的 DEFAULTS 内的数组引用）。 */
@@ -469,6 +478,9 @@ function normalizeConfig(rawConfig, log) {
     enabled: DEFAULTS.enabled,
     forceIps: DEFAULTS.forceIps.slice(),
     retryDelaysMs: DEFAULTS.retryDelaysMs.slice(),
+    blacklistTtlMs: DEFAULTS.blacklistTtlMs,
+    confirmDelayMs: DEFAULTS.confirmDelayMs,
+    expiryCheckIntervalMs: DEFAULTS.expiryCheckIntervalMs,
   };
 
   if (rawConfig === null || typeof rawConfig !== 'object') return config;
@@ -535,6 +547,38 @@ function normalizeConfig(rawConfig, log) {
       else notes.push('retryDelaysMs 过滤后为空，已用默认值 ' + DEFAULTS.retryDelaysMs.join(','));
     } else {
       notes.push('retryDelaysMs 必须是数组，已用默认值 ' + DEFAULTS.retryDelaysMs.join(','));
+    }
+  }
+
+  if (has('blacklistTtlMs')) {
+    const value = rawConfig.blacklistTtlMs;
+    // 下限 10000ms：再短就等于"刚拉黑就过期"，黑名单失去意义；
+    // 上限 3600000ms：再长就等于"一次误判管一小时"，与软过期的初衷相悖。
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      config.blacklistTtlMs = Math.min(3600000, Math.max(10000, Math.round(value)));
+    } else {
+      notes.push('blacklistTtlMs 必须是有限数字，已用默认值 ' + DEFAULTS.blacklistTtlMs);
+    }
+  }
+
+  if (has('confirmDelayMs')) {
+    const value = rawConfig.confirmDelayMs;
+    // 下限 100ms：0 会让二次确认形同虚设；上限 10000ms：再长会让探测收尾拖得太久。
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      config.confirmDelayMs = Math.min(10000, Math.max(100, Math.round(value)));
+    } else {
+      notes.push('confirmDelayMs 必须是有限数字，已用默认值 ' + DEFAULTS.confirmDelayMs);
+    }
+  }
+
+  if (has('expiryCheckIntervalMs')) {
+    const value = rawConfig.expiryCheckIntervalMs;
+    // 下限 5000ms：太频繁等于每秒都在检查，虽然不联网也没必要；
+    // 上限 600000ms：再长则过期条目可能要等十分钟才被纠正。
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      config.expiryCheckIntervalMs = Math.min(600000, Math.max(5000, Math.round(value)));
+    } else {
+      notes.push('expiryCheckIntervalMs 必须是有限数字，已用默认值 ' + DEFAULTS.expiryCheckIntervalMs);
     }
   }
 
