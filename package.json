@@ -1,0 +1,60 @@
+{
+  "name": "dsh-opencode-ip-guard",
+  "version": "0.1.0",
+  "description": "A DeepSeek Harness plugin that filters the blackholed A records of opencode.ai through the undici connect.lookup hook, so DSH never dials a dead IP.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "undici": "^8.11.2"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "license": "Apache-2.0",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "acceptance": "node scripts/acceptance.mjs",
+    "smoke": "node scripts/smoke-host.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "opencode",
+    "opencode-go",
+    "undici",
+    "dns",
+    "ip"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nicholas023/dsh-opencode-ip-guard.git"
+  },
+  "homepage": "https://github.com/Nicholas023/dsh-opencode-ip-guard#readme",
+  "bugs": {
+    "url": "https://github.com/Nicholas023/dsh-opencode-ip-guard/issues"
+  },
+  "author": "Nicholas023"
+}

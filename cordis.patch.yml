@@ -1,0 +1,7 @@
+# 这是本插件自带的 bundle patch，只有一个职责：告诉 DSH「把本插件插到插件链的哪一行」。
+# 它故意不写 config：默认值由插件代码里的合并逻辑负责，用户要改配置时在
+# `~/.dsh/profiles/<profile>/cordis.patch.yml` 里按 id 覆盖（参见 README「配置」一节）。
+# 把默认配置写进这个文件的话，会和用户 profile 里的覆盖值形成两个真源，后续难以判断谁生效。
+- insert:
+    - id: opencode-ip-guard
+      name: 'dsh-opencode-ip-guard'

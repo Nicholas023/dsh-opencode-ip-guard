@@ -1,0 +1,19 @@
+# npm 包只需要「能跑起来」的文件；测试、文档、CI 与本地产物都不该进 tarball。
+# 这里与 package.json 的 `files` 白名单保持同一口径：白名单负责「只取什么」，本文件负责「再排掉什么」，
+# 两处同时维护是为了别人只改一处时还有第二道保险。
+test/
+docs/
+.github/
+.dsh-ops/
+coverage/
+node_modules/
+*.tgz
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+.git/
+.gitignore
+.gitattributes
+pnpm-lock.yaml
+package-lock.json

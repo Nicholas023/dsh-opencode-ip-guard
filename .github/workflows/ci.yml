@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22.x, 24.x]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: 安装依赖
+        run: npm install --no-audit --no-fund
+      - name: 单元测试
+        run: npm test
+      - name: 集成冒烟（伪造宿主 ctx，验证插件可加载）
+        run: node scripts/smoke-host.mjs
+      - name: 验收脚本（无网络时真实网络项自动跳过）
+        run: node scripts/acceptance.mjs
