@@ -111,7 +111,8 @@ pnpm add "link:D:\DSH-Files-v2\02-DSH开发\dshapi长连接插件"
 - id: opencode-ip-guard
   config:
     hostname: 'opencode.ai'       # 要防护的域名
-    probeTimeoutMs: 10000         # 单个 IP 的 TLS 握手超时（毫秒）
+    probeTimeoutMs: 4000          # 单个 IP 的 TLS 握手超时（毫秒）
+    connectTimeoutMs: 10000       # undici 运行时建连超时（毫秒）
     enabled: true                 # 总开关
     forceIps: []                  # 测试钩子：非空时忽略真实解析，只用这些 IP
     retryDelaysMs: [60000, 120000] # 探测全失败后的重试间隔（毫秒）
@@ -123,7 +124,8 @@ pnpm add "link:D:\DSH-Files-v2\02-DSH开发\dshapi长连接插件"
 | 键 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `hostname` | string | `'opencode.ai'` | 需要防护的域名。只防这一个域名是刻意的设计，不做通用 IP 优选。 |
-| `probeTimeoutMs` | number | `10000` | 单个 IP 的 TLS 握手超时；同时被用作 undici 的建连超时（两者刻意共用同一个值，默认 10 秒与 DSH 运行时口径一致）。所有 IP 并发探测，所以一轮探测总耗时约等于这个值。 |
+| `probeTimeoutMs` | number | `4000` | 单个 IP 的 TLS 握手超时。可用 IP 实测 0.35~0.4 秒即完成握手，4 秒足够覆盖慢网络；所有 IP 并发探测，一轮探测总耗时约等于这个值。 |
+| `connectTimeoutMs` | number | `10000` | undici 的运行时建连超时。**与探测超时是两件事**：探测求快、建连求容错，因此拆成两个独立配置项。 |
 | `enabled` | boolean | `true` | 总开关。设为 `false` 时插件不探测、不注入 dispatcher（等价于没装）。 |
 | `forceIps` | string[] | `[]` | 测试钩子：非空时忽略真实 DNS 解析，只在这些 IP 里过滤挑选。用于验收 3 的阴性对照。 |
 | `retryDelaysMs` | number[] | `[60000, 120000]` | 探测全失败后的重试间隔序列。数组走完仍失败则置 `failed` 并放弃。 |
@@ -134,6 +136,7 @@ pnpm add "link:D:\DSH-Files-v2\02-DSH开发\dshapi长连接插件"
 **取值校验**（非法值一律回退默认值并打一条 warn，绝不抛错、绝不影响 DSH 启动）：
 
 - `probeTimeoutMs` 会被夹到 2000~30000 毫秒之间；
+- `connectTimeoutMs` 会被夹到 2000~60000 毫秒之间；
 - `retryDelaysMs` 只接受非负有限数，过滤后为空则回默认；
 - `forceIps` 只接受合法 IPv4 字面量；
 - `hostname` 需为非空字符串（会 trim 并转小写）；

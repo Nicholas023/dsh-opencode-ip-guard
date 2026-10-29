@@ -15,8 +15,13 @@ import { buildStatus as defaultBuildStatus } from './status.js';
  */
 const DEFAULT_CONFIG = Object.freeze({
   hostname: 'opencode.ai',
-  // D7/D19：与 DSH 的 connect timeout 口径一致，10 秒还连不上就没有意义
-  probeTimeoutMs: 10000,
+  // 探测超时（用户 2026-10-29 决定从 10 秒降到 4 秒）：
+  // 探测只是"确认这个 IP 能不能握上手"，可用 IP 实测 0.35~0.4 秒就完成，
+  // 4 秒足够覆盖慢网络；再长只会让黑洞 IP 的判定拖慢整轮探测。
+  probeTimeoutMs: 4000,
+  // 运行时 undici 建连超时（决策 D7，保持 10 秒）：
+  // 与探测是两件事——探测求"快"，建连求"容错"。两者共用过一段时间，2026-10-29 拆分。
+  connectTimeoutMs: 10000,
   enabled: true,
   forceIps: [],
   // D9：第一次失败 1 分钟后重探；仍失败 2 分钟后再探；第三次失败放弃
@@ -229,6 +234,10 @@ function mergeConfig(raw) {
       typeof source.probeTimeoutMs === 'number' && Number.isFinite(source.probeTimeoutMs) && source.probeTimeoutMs > 0
         ? source.probeTimeoutMs
         : DEFAULT_CONFIG.probeTimeoutMs,
+    connectTimeoutMs:
+      typeof source.connectTimeoutMs === 'number' && Number.isFinite(source.connectTimeoutMs) && source.connectTimeoutMs > 0
+        ? source.connectTimeoutMs
+        : DEFAULT_CONFIG.connectTimeoutMs,
     // 只有显式 false 才算关闭；其他脏值按启用处理，避免「配置写错=插件静默消失」
     enabled: source.enabled !== false,
     forceIps: Array.isArray(source.forceIps) ? uniqueStrings(source.forceIps) : [],
@@ -831,7 +840,7 @@ export function createGuard(opts = {}) {
         });
         handle = await installDispatcher({
           lookup,
-          connectTimeoutMs: config.probeTimeoutMs,
+          connectTimeoutMs: config.connectTimeoutMs,
         });
       } catch (error) {
         state = 'error';

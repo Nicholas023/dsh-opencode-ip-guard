@@ -64,7 +64,10 @@ const REFRESH_ROUTE = '/opencode-ip-guard/refresh';
  * （一旦被改，后续 apply 的默认值就被污染，属于最难查的那类 bug）。
  *
  * - hostname：只防护这一个域名（决策 D14：不做通用 IP 优选）；
- * - probeTimeoutMs：单 IP TLS 握手超时；D3 定为 6~10 秒档，取 10 秒与 D7/D19 一致；
+ * - probeTimeoutMs：单 IP TLS 握手超时。2026-10-29 由 10 秒降为 4 秒——可用 IP 实测
+ *   0.35~0.4 秒即完成握手，4 秒足够覆盖慢网络，10 秒只会拖慢黑洞判定；
+ * - connectTimeoutMs：undici 运行时建连超时（决策 D7，保持 10 秒）。与探测超时是两件事：
+ *   探测求快、建连求容错，2026-10-29 起拆分为两个独立配置项；
  * - enabled：总开关，false 时 guard 仍会起来但只读不做任何接管；
  * - forceIps：测试钩子（验收 3 阴性对照用），空数组表示走真实 DNS；
  * - retryDelaysMs：探测全失败后的重试间隔（决策 D9：1 分钟 → 2 分钟 → 放弃）；
@@ -77,7 +80,8 @@ const REFRESH_ROUTE = '/opencode-ip-guard/refresh';
  */
 const DEFAULTS = Object.freeze({
   hostname: 'opencode.ai',
-  probeTimeoutMs: 10000,
+  probeTimeoutMs: 4000,
+  connectTimeoutMs: 10000,
   enabled: true,
   forceIps: Object.freeze([]),
   retryDelaysMs: Object.freeze([60000, 120000]),
@@ -468,13 +472,14 @@ function sendJson(res, status, payload) {
  *
  * @param {object|undefined} rawConfig - profile 里的 config。
  * @param {(line: string) => void} log - 日志出口（用于报告被丢弃的非法值）。
- * @returns {{hostname: string, probeTimeoutMs: number, enabled: boolean, forceIps: string[], retryDelaysMs: number[], blacklistTtlMs: number, confirmDelayMs: number, expiryCheckIntervalMs: number}} 合并后的配置。
+ * @returns {{hostname: string, probeTimeoutMs: number, connectTimeoutMs: number, enabled: boolean, forceIps: string[], retryDelaysMs: number[], blacklistTtlMs: number, confirmDelayMs: number, expiryCheckIntervalMs: number}} 合并后的配置。
  */
 function normalizeConfig(rawConfig, log) {
   /** 归一化结果：先深拷贝默认值（防止下游改动污染冻结的 DEFAULTS 内的数组引用）。 */
   const config = {
     hostname: DEFAULTS.hostname,
     probeTimeoutMs: DEFAULTS.probeTimeoutMs,
+    connectTimeoutMs: DEFAULTS.connectTimeoutMs,
     enabled: DEFAULTS.enabled,
     forceIps: DEFAULTS.forceIps.slice(),
     retryDelaysMs: DEFAULTS.retryDelaysMs.slice(),
@@ -507,6 +512,17 @@ function normalizeConfig(rawConfig, log) {
       config.probeTimeoutMs = Math.min(30000, Math.max(2000, Math.round(value)));
     } else {
       notes.push('probeTimeoutMs 必须是有限数字，已用默认值 ' + DEFAULTS.probeTimeoutMs);
+    }
+  }
+
+  if (has('connectTimeoutMs')) {
+    const value = rawConfig.connectTimeoutMs;
+    // 下限 2000ms：低于 2 秒会让正常但稍慢的跨境建连被误杀；
+    // 上限 60000ms：再长就失去"快速失败"的意义。
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      config.connectTimeoutMs = Math.min(60000, Math.max(2000, Math.round(value)));
+    } else {
+      notes.push('connectTimeoutMs 必须是有限数字，已用默认值 ' + DEFAULTS.connectTimeoutMs);
     }
   }
 

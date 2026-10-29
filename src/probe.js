@@ -22,7 +22,7 @@ const DEFAULT_PORT = 443;
  * D3 定为「6~10 秒」，取 10 秒与 DSH 运行时的 connect timeout 口径一致（D7）；
  * 黑洞 IP 在 Windows 上要等 SYN 重传约 21 秒才失败，10 秒足以判定它不可用。
  */
-const DEFAULT_TIMEOUT_MS = 10000;
+const DEFAULT_TIMEOUT_MS = 4000;
 
 /**
  * 把底层错误转成稳定的字符串原因。

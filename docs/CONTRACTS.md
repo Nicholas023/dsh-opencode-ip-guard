@@ -158,7 +158,7 @@
      */
     export function createGuard(opts)
     // opts = {
-    //   config: { hostname, probeTimeoutMs, enabled, forceIps, retryDelaysMs,
+    //   config: { hostname, probeTimeoutMs, connectTimeoutMs, enabled, forceIps, retryDelaysMs,
     //             blacklistTtlMs, confirmDelayMs, expiryCheckIntervalMs },  // 已合并默认值
     //   log: (line: string) => void,
     //   deps?: { createLookup, installDispatcher, probeAll, createBlacklist, buildStatus }  // 可注入，便于测试
