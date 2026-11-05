@@ -121,6 +121,11 @@ pnpm add "link:D:\DSH-Files-v2\02-DSH开发\dshapi长连接插件"
     blacklistTtlMs: 300000        # 黑名单条目的软过期时间（毫秒）
     confirmDelayMs: 2000          # 探测失败后的二次确认间隔（毫秒）
     expiryCheckIntervalMs: 30000  # 检查"是否有条目过期"的间隔（毫秒）
+    sessionHeader:                # 会话头兜底注入（与 IP 过滤互不依赖）
+      enabled: true               # 默认开启
+      providers: [opencode, opencode-go]  # 要补头的 provider 路由键
+      mode: session-id            # session-id | uuid
+      debug: false                # true 时每次注入打一条日志
 ```
 
 | 键 | 类型 | 默认值 | 说明 |
@@ -134,6 +139,7 @@ pnpm add "link:D:\DSH-Files-v2\02-DSH开发\dshapi长连接插件"
 | `blacklistTtlMs` | number | `300000` | **软过期时间**。opencode.ai 某些 IP 的可达性会分钟级波动，单次探测必然有误判；条目到期自动视为可用，让误判最多存活这么久。 |
 | `confirmDelayMs` | number | `2000` | **失败二次确认间隔**。探测失败的 IP 隔这么久再试一次，**连续两次失败才判黑洞**，避免瞬时抖动被固化成「永久坏」。 |
 | `expiryCheckIntervalMs` | number | `30000` | 检查过期条目的节拍。注意这不是周期性探测：只有存在「过期且是黑洞」的条目时才会触发重探。 |
+| `sessionHeader` | object | `{enabled:true, providers:['opencode','opencode-go'], mode:'session-id', debug:false}` | **会话头兜底注入**。opencode 网关缺 `x-opencode-session` 会直接 400；开启后对目标 provider 的请求自动补上。**请求已带该头时绝不覆盖。** |
 
 **取值校验**（非法值一律回退默认值并打一条 warn，绝不抛错、绝不影响 DSH 启动）：
 
@@ -146,6 +152,14 @@ pnpm add "link:D:\DSH-Files-v2\02-DSH开发\dshapi长连接插件"
 - `blacklistTtlMs` 夹到 10000~3600000 毫秒；
 - `confirmDelayMs` 夹到 100~10000 毫秒；
 - `expiryCheckIntervalMs` 夹到 5000~600000 毫秒。
+
+### 为什么需要会话头注入
+
+opencode 的网关对缺少 `x-opencode-session` 的请求直接返回 **400 MissingSessionID**（已实测复现：带任意非空值 → 正常路由；不带 → 立即 400）。这个头还是它把同一会话钉到同一上游后端的依据，钉稳了 prompt cache 才能整段对话保持温热。
+
+DSH 自己的链路本来就会带这个头（agent-loop 塞 sessionId → 适配器透传 → pi-ai 加头），本插件做的是**兜底**：万一某个版本或某条旁路请求漏了，插件在 HTTP 出口补上。
+
+**安全边界**：请求已经带了这个头 → 原样放行，绝不覆盖（覆盖会破坏 DSH 算好的会话亲和）。非目标 provider 的请求完全不受影响。
 
 ### 为什么需要「软过期 + 二次确认」
 

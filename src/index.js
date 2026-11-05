@@ -53,6 +53,27 @@ const GUARD_PATH = (() => {
     : home.replace(/\\/g, '/') + '/.dsh/plugins/dsh-opencode-ip-guard/src/guard.js';
 })();
 
+/**
+ * 会话头注入实现的位置。解析规则与 GUARD_PATH 一致。
+ *
+ * 为什么单独成一个模块：它只负责给 opencode 请求补 x-opencode-session 头，
+ * 与黑洞 IP 过滤互不依赖 —— 任一块挂掉，另一块仍能独立工作。
+ */
+const SESSION_HEADER_PATH = (() => {
+  try {
+    const here = import.meta.url;
+    if (typeof here === 'string' && here.startsWith('file:')) {
+      return fileURLToPath(new URL('./session-header.js', here));
+    }
+  } catch {
+    // 落到回退分支
+  }
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  return home === ''
+    ? './session-header.js'
+    : home.replace(/\\/g, '/') + '/.dsh/plugins/dsh-opencode-ip-guard/src/session-header.js';
+})();
+
 /** 状态查询路由；client.js 里的 STATUS_URL 必须与本值一致。 */
 const STATUS_ROUTE = '/opencode-ip-guard/status';
 
@@ -88,6 +109,14 @@ const DEFAULTS = Object.freeze({
   blacklistTtlMs: 300000,
   confirmDelayMs: 2000,
   expiryCheckIntervalMs: 30000,
+  // 会话头注入（2026-11-06 新增）：opencode 网关缺 x-opencode-session 会直接 400，
+  // 这里默认开启做兜底；请求已带该头时绝不覆盖（由 session-header.js 保证）。
+  sessionHeader: Object.freeze({
+    enabled: true,
+    providers: Object.freeze(['opencode', 'opencode-go']),
+    mode: 'session-id',
+    debug: false,
+  }),
 });
 
 /** 递增序号：同一毫秒内 apply 被重跑两次时，仍能拿到不同的模块 URL。 */
@@ -217,6 +246,22 @@ async function mount(ctx, rawConfig) {
 
   // 先注册路由再 start：面板最早一次轮询能拿到 idle 快照，而不是 404。
   registerRoutes(ctx, guard, log);
+
+  // ── 会话头注入（与黑洞过滤完全解耦）──
+  // 单独 try/catch：这块失败不影响 IP 过滤，反之亦然。
+  // 动态加载带时间戳，和 guard.js 一样支持「改代码 + 改配置即热更新」。
+  try {
+    const headerHref = pathToFileURL(SESSION_HEADER_PATH).href + '?v=' + Date.now() + '-' + (++reloadSeq);
+    const headerImpl = await import(headerHref);
+    if (typeof headerImpl.createSessionHeader === 'function') {
+      const sessionHeader = headerImpl.createSessionHeader({ config: config.sessionHeader, log });
+      sessionHeader.attach(ctx);
+    } else {
+      log('[opencode-ip-guard] session-header.js 未导出 createSessionHeader，跳过会话头注入');
+    }
+  } catch (error) {
+    log('[opencode-ip-guard] 会话头注入挂载失败（IP 过滤不受影响）：' + describeError(error));
+  }
 
   // ── 清理登记：dispose 时停定时器 + 还原 dispatcher ──
   // 必须自己清理：guard 持有 undici 全局 dispatcher 与重试定时器，
@@ -486,6 +531,7 @@ function normalizeConfig(rawConfig, log) {
     blacklistTtlMs: DEFAULTS.blacklistTtlMs,
     confirmDelayMs: DEFAULTS.confirmDelayMs,
     expiryCheckIntervalMs: DEFAULTS.expiryCheckIntervalMs,
+    sessionHeader: DEFAULTS.sessionHeader,
   };
 
   if (rawConfig === null || typeof rawConfig !== 'object') return config;
@@ -595,6 +641,17 @@ function normalizeConfig(rawConfig, log) {
       config.expiryCheckIntervalMs = Math.min(600000, Math.max(5000, Math.round(value)));
     } else {
       notes.push('expiryCheckIntervalMs 必须是有限数字，已用默认值 ' + DEFAULTS.expiryCheckIntervalMs);
+    }
+  }
+
+  if (has('sessionHeader')) {
+    const value = rawConfig.sessionHeader;
+    // 这一段的字段校验交给 session-header.js 的 resolveSessionHeaderConfig 做：
+    // 它能接受 undefined / 脏对象并全部回退默认值，这里只挡「明显不是对象」的情况。
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      config.sessionHeader = value;
+    } else {
+      notes.push('sessionHeader 必须是对象，已用默认值（enabled=true / providers=[opencode, opencode-go] / mode=session-id）');
     }
   }
 

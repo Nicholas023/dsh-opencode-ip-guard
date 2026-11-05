@@ -125,29 +125,48 @@ Everything is optional. Override it by id in the profile's `cordis.patch.yml`:
 ```yaml
 - id: opencode-ip-guard
   config:
-    hostname: 'opencode.ai'        # domain to protect
-    probeTimeoutMs: 10000          # TLS handshake timeout per IP (ms)
-    enabled: true                  # master switch
-    forceIps: []                   # test hook: when non-empty, skip real DNS and use these IPs only
-    retryDelaysMs: [60000, 120000] # probe retry delays (ms) after a total failure
+    hostname: 'opencode.ai'         # domain to protect
+    probeTimeoutMs: 4000            # TLS handshake timeout per IP (ms)
+    connectTimeoutMs: 10000         # undici connect timeout at runtime (ms)
+    enabled: true                   # master switch
+    forceIps: []                    # test hook: skip real DNS and use these IPs only
+    retryDelaysMs: [60000, 120000]  # retry delays after a total probe failure (ms)
+    blacklistTtlMs: 300000          # soft expiry of a blacklist entry (ms)
+    confirmDelayMs: 2000            # second-confirmation delay for a failed probe (ms)
+    expiryCheckIntervalMs: 30000    # how often to scan for expired entries (ms)
+    sessionHeader:                  # fallback injection of the OpenCode session header
+      enabled: true
+      providers: [opencode, opencode-go]
+      mode: session-id              # session-id | uuid
+      debug: false
 ```
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `hostname` | string | `'opencode.ai'` | Domain to protect. Protecting exactly one domain is intentional; this is not a generic IP optimiser. |
-| `probeTimeoutMs` | number | `10000` | TLS handshake timeout per IP; also used as undici's connect timeout (the two intentionally share one value, defaulting to the 10 s used by DSH). All IPs are probed concurrently, so one round takes roughly this long. |
+| `probeTimeoutMs` | number | `4000` | TLS handshake timeout per IP. A reachable IP completes the handshake in ~0.35–0.4 s, so 4 s covers slow networks; all IPs are probed concurrently. |
+| `connectTimeoutMs` | number | `10000` | undici's runtime connect timeout. **Independent** of `probeTimeoutMs`: probing wants speed, connecting wants tolerance. |
 | `enabled` | boolean | `true` | Master switch. `false` means no probing and no dispatcher installation (as if not installed). |
-| `forceIps` | string[] | `[]` | Test hook: when non-empty, real DNS is ignored and only these IPs are filtered/selected. Used by acceptance test 3. |
-| `retryDelaysMs` | number[] | `[60000, 120000]` | Retry delays after a total probe failure. When the list is exhausted the state becomes `failed` and probing stops. |
+| `forceIps` | string[] | `[]` | Test hook: when non-empty, real DNS is ignored and only these IPs are filtered/selected. |
+| `retryDelaysMs` | number[] | `[60000, 120000]` | Retry delays after a total probe failure. When exhausted the state becomes `failed` and probing stops. |
+| `blacklistTtlMs` | number | `300000` | Soft expiry. IP reachability fluctuates, so any single-probe verdict expires after this long. |
+| `confirmDelayMs` | number | `2000` | A failed IP is re-probed once after this delay; only two consecutive failures blacklist it. |
+| `expiryCheckIntervalMs` | number | `30000` | Scan cadence for expired entries. This is **not** periodic probing: a re-probe only happens when an expired *black* entry exists. |
+| `sessionHeader` | object | see above | Fallback injection of `x-opencode-session`. A request that already carries the header is never modified. |
 
 **Value validation** — invalid values fall back to defaults with a single warning; they never
 throw and never break DSH startup:
 
 - `probeTimeoutMs` is clamped to 2000–30000 ms;
+- `connectTimeoutMs` is clamped to 2000–60000 ms;
 - `retryDelaysMs` accepts only non-negative finite numbers; an empty result falls back to defaults;
 - `forceIps` accepts only valid IPv4 literals;
 - `hostname` must be a non-empty string (trimmed and lower-cased);
-- `enabled` accepts booleans only.
+- `enabled` accepts booleans only;
+- `blacklistTtlMs` is clamped to 10000–3600000 ms;
+- `confirmDelayMs` is clamped to 100–10000 ms;
+- `expiryCheckIntervalMs` is clamped to 5000–600000 ms;
+- `sessionHeader` must be an object; its own fields fall back per-key.
 
 ---
 
@@ -312,3 +331,12 @@ The only runtime dependency is `undici` (`^8.11.2`); no other third-party packag
 
 You may use, modify and redistribute this plugin (including commercially) provided the
 license and copyright notices are retained. The software is provided without warranty.
+
+### Why session-header injection
+
+OpenCode's gateway returns **400 MissingSessionID** for requests without `x-opencode-session` (reproduced locally: any non-empty value routes normally; missing → immediate 400). The value also pins a conversation to the same upstream backend, which keeps OpenCode's prompt cache warm.
+
+DSH already sends this header (agent-loop stamps `sessionId` → adapter forwards it → pi-ai attaches it). This plugin is a **safety net** for versions or side-channel calls that miss it.
+
+**Safety boundary:** a request that already carries the header is passed through untouched; non-target providers are never affected.
+

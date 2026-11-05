@@ -256,3 +256,35 @@
 
 - 报告里给出「跑了什么、结果如何」；
 - 涉及网络的测试（probe）要能在无网络时优雅跳过。
+
+---
+
+## 契约 11：`src/session-header.js`（2026-11-06 新增）
+
+     /**
+      * 创建会话头注入器：给 opencode(Go) 请求补 x-opencode-session。
+      */
+     export function createSessionHeader(options)
+     // options = { config?: object, log: (line: string) => void }
+     // 返回 { attach(ctx) }
+
+     export function resolveSessionHeaderConfig(raw)
+     // -> { enabled: boolean, providers: Set<string>, mode: 'session-id'|'uuid', debug: boolean }
+
+     export function headerValueFor(sessionId, mode, table)
+     // -> string | undefined（空 sessionId 返回 undefined，表示不注入）
+
+     export function patchFetch(originalFetch, als)
+     // -> 包装后的 fetch；无 store 时完全透传
+
+     export function withStore(iterable, store, als)
+     // -> 包装异步迭代器，使每次 next()/throw() 都在 store 内执行
+
+行为要求：
+
+- `attach(ctx)` 通过 `ctx.effect` 替换 `globalThis.fetch`，disposer 恢复原值（且只在仍是我们那版时恢复）；
+- 通过 `ctx.inject(['llm'])` 后注册 `ctx.on('llm/stream', handler, { prepend: true })`；
+- handler 只处理 `options.provider` 在 `providers` 集合内、且 `options.sessionId` 非空的调用；
+- **必须**用 `withStore` 包装 `next()` 返回的惰性流，否则真正发请求时读不到 store；
+- 请求已带 `x-opencode-session` → 原样放行，**绝不覆盖**；
+- 任何环节异常只 log，不得抛给 DSH。

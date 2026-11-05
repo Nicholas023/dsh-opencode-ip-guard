@@ -5,6 +5,14 @@
 
 ## [未发布]
 
+## [0.2.0] - 2026-11-06
+
+### 新增：会话头兜底注入
+- 监听 `llm/stream`，对 `opencode` / `opencode-go` 路由的调用补 `x-opencode-session` 头；
+- 用 `AsyncLocalStorage` + 包装异步迭代器，保证惰性流里真正发出 HTTP 请求时仍能读到会话值；
+- **请求已带该头时绝不覆盖**，保证不破坏 DSH 自己的会话亲和与 prompt cache；
+- 新配置段 `sessionHeader`（`enabled` / `providers` / `mode` / `debug`）；
+- 与黑洞 IP 过滤完全解耦：任一模块失败不影响另一个。
 ## [0.1.0]
 
 ### 超时拆分（2026-10-29）
