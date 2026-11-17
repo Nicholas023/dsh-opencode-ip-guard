@@ -543,20 +543,23 @@ export function createGuard(opts = {}) {
   }
 
   /**
-   * 找出「TTL 已过期且仍标记为黑洞」的条目 IP。
-   * 为什么要先取 expiredIps 再回查 entries：expiredIps 返回的是所有过期条目（含 ok），
-   * 而只有黑洞条目过期才意味着「过滤结论需要重新验证」。
+   * 找出「TTL 已过期」的全部条目 IP —— 不再区分 ok / black。
+   *
+   * 2026-11-18 修正：原实现只收集「过期且是黑洞」的条目，理由是「ok 过期不影响过滤」。
+   * 但实测下来这造成一个用户可见的 bug：当所有 IP 都可用时，没有任何条目会触发补探，
+   * 面板上的探测数据会永久冻在启动那一刻（用户原话：「插件不会自动刷新探测节点」）。
+   * 用户明确要求按 TTL 定期刷新，因此改为「任何条目过期都补探」——
+   * 代价是每个 TTL 周期一轮探测，收益是结论永远不过期。
+   *
    * @param {number} now
-   * @returns {string[]}
+   * @returns {string[]} 已过期条目的 IP 列表。
    */
-  function collectExpiredBlackIps(now) {
+  function collectExpiredIps(now) {
     try {
       const expired = typeof blacklist.expiredIps === 'function' ? blacklist.expiredIps(now) : [];
       if (!Array.isArray(expired) || expired.length === 0) return [];
-      const expiredSet = new Set(expired);
-      return safeEntries()
-        .filter((entry) => entry && entry.state === 'black' && expiredSet.has(entry.ip))
-        .map((entry) => entry.ip);
+      // expiredIps 已经返回过期条目，这里只做一次合法性收窄，保留顺序。
+      return expired.filter((ip) => typeof ip === 'string' && ip !== '');
     } catch (error) {
       safeLog(LOG_PREFIX + ' 检查过期条目失败：' + describeError(error));
       return [];
@@ -564,9 +567,12 @@ export function createGuard(opts = {}) {
   }
 
   /**
-   * 过期检查节拍回调：只有真的存在过期黑洞条目时才补探一次。
-   * 为什么排除 ok 条目：ok 过期不影响过滤，若也算触发条件就会变成每 TTL 一次的周期探测，
-   * 违背用户「不打扰远端」的原则（D5）；同时用 probeInFlight 去重，探测进行中就等下一拍。
+   * 过期检查节拍回调：只要存在任何过期条目就补探一次。
+   *
+   * 2026-11-18 修正：原实现只对「过期黑洞条目」补探，导致全绿时面板数据永不刷新。
+   * 现在改为「任何条目过期都补探」，等价于「每 TTL 周期自动刷新一次探测结论」。
+   * 用 probeInFlight 去重：上一轮还没跑完就跳过这一拍，避免探测堆叠。
+   *
    * @returns {void}
    */
   function onExpiryTick() {
@@ -574,15 +580,15 @@ export function createGuard(opts = {}) {
       if (disposed || !config.enabled) return;
       if (state === 'disabled_by_proxy') return;
       if (probeInFlight) return;
-      const expiredBlackIps = collectExpiredBlackIps(Date.now());
-      if (expiredBlackIps.length === 0) return;
+      const expiredIps = collectExpiredIps(Date.now());
+      if (expiredIps.length === 0) return;
       safeLog(
         LOG_PREFIX +
           ' 检测到 ' +
-          expiredBlackIps.length +
-          ' 个黑洞条目 TTL 到期（' +
-          expiredBlackIps.join(', ') +
-          '），触发补探',
+          expiredIps.length +
+          ' 个条目 TTL 到期（' +
+          expiredIps.join(', ') +
+          '），触发补探刷新',
       );
       kickProbe('过期补探');
     } catch (error) {

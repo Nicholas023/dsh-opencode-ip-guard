@@ -783,7 +783,10 @@ test('过期黑洞条目触发一次补探，间隔 30 秒且 unref', async () =
   guard.dispose();
 });
 
-test('只有 ok 条目过期时不触发补探（避免退化成周期探测）', async () => {
+test('ok 条目过期同样触发补探（每 TTL 自动刷新探测结论）', async () => {
+  // 2026-11-18 口径变更：原实现只对「过期黑洞」补探，导致全绿时面板数据永不刷新
+  // （用户实测反馈「插件不会自动刷新探测节点」）。现在改为任何条目过期都补探，
+  // 本用例从「负向」翻转为「正向」，锁定这条新行为。
   const timers = createFakeTimers();
   const probe = createProbeStub(() => new Set());
   const { deps } = createBaseDeps({
@@ -802,9 +805,10 @@ test('只有 ok 条目过期时不触发补探（避免退化成周期探测）'
   assert.equal(probe.calls.count, 1);
   assert.deepEqual(guard.snapshot().stats, { ok: 2, black: 0, total: 2 });
 
+  // TTL=0 时所有条目立即过期，暂停一拍应触发第二轮探测
   timers.fireInterval();
-  await sleep(30);
-  assert.equal(probe.calls.count, 1, 'ok 条目过期不应触发探测');
+  await waitFor(() => probe.calls.count === 2, '第二轮探测');
+  assert.equal(probe.calls.count, 2, 'ok 条目过期也应触发探测（自动刷新）');
   guard.dispose();
 });
 
